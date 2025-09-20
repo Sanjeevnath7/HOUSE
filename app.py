@@ -1,293 +1,171 @@
-import pandas as pd
-from sklearn.preprocessing import LabelEncoder
+# real_estate_app.py
+
 import streamlit as st
-import joblib
+import pandas as pd
 import numpy as np
 import pickle
+import re
+from sklearn.preprocessing import LabelEncoder
 from sklearn.linear_model import LinearRegression
 from xgboost import XGBRegressor
-from statsmodels.tsa.statespace.sarimax import SARIMAX
 from sklearn.neighbors import NearestNeighbors
+from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-def load_and_encode_data(path="data/house2.csv"):
+# ----------------------------
+# 1. Load / Prepare Data
+# ----------------------------
+@st.cache_data
+def load_data(path="home2.csv"):
     df = pd.read_csv(path)
-
-    # Handle nulls
     df.fillna(df.median(numeric_only=True), inplace=True)
+    return df
 
-    # Encode categorical features
-    cat_cols = ["location"]
-    encoders = {}
-    for col in cat_cols:
-        le = LabelEncoder()
-        df[col + "_encoded"] = le.fit_transform(df[col])
-        encoders[col] = le
+df = load_data()
 
-    return df, encoders
+# Encode categorical features
+if "location_encoded" not in df.columns:
+    le_location = LabelEncoder()
+    df["location_encoded"] = le_location.fit_transform(df["City"])
+else:
+    le_location = LabelEncoder()
+    le_location.fit(df["City"])
 
-
-
-# Train & Save Models
-def train_models(df):
-    X = df[["sqft", "bedrooms", "bathrooms", "location_encoded"]]
-    y = df["price"]
-
-    # Linear Regression
-    lr = LinearRegression().fit(X, y)
-    pickle.dump(lr, open("models/linear_model.pkl", "wb"))
-
-    # XGBoost
-    xgb = XGBRegressor().fit(X, y)
-    pickle.dump(xgb, open("models/xgb_model.pkl", "wb"))
-
-    # SARIMA / SARIMAX (time series)
-    ts = df.groupby("date")["price"].mean()
-    sarimax = SARIMAX(ts, order=(1,1,1), seasonal_order=(1,1,1,12)).fit()
-    pickle.dump(sarimax, open("models/sarimax_model.pkl", "wb"))
-
-def load_models():
-    models = {}
-    for m in ["linear_model.pkl", "xgb_model.pkl", "sarimax_model.pkl"]:
-        try:
-            models[m] = pickle.load(open("models/" + m, "rb"))
-        except:
-            models[m] = None
-    return models
-
-def predict(models, new_house):
-    X = pd.DataFrame([new_house])
-
-    preds = []
-    if models["linear_model.pkl"]:
-        preds.append(models["linear_model.pkl"].predict(X)[0])
-    if models["xgb_model.pkl"]:
-        preds.append(models["xgb_model.pkl"].predict(X)[0])
-    if models["sarimax_model.pkl"]:
-        preds.append(models["sarimax_model.pkl"].forecast(steps=1)[0])
-
-    return np.mean(preds)
-
-
-
-def load_models():
-    """
-    Load trained ML models (Linear Regression, XGBoost, etc.)
-    """
-    models = {}
+# ----------------------------
+# 2. Train / Load Models
+# ----------------------------
+# Linear Regression
+if "linear_model.pkl" in df.columns:
     try:
-        models["linear"] = joblib.load("linear_regression.pkl")
-        models["xgb"] = joblib.load("xgboost.pkl")
-        # Add more if you saved SARIMA / SARIMAX
-    except Exception as e:
-        print("⚠ Error loading models:", e)
-    return models
+        lr_model = pickle.load(open("linear_model.pkl", "rb"))
+    except:
+        lr_model = LinearRegression()
+        X = df[["Area", "Bedrooms", "Bathrooms", "location_encoded"]]
+        y = df["Price"]
+        lr_model.fit(X, y)
+        pickle.dump(lr_model, open("linear_model.pkl", "wb"))
+else:
+    lr_model = LinearRegression()
+    X = df[["Area", "Bedrooms", "Bathrooms", "location_encoded"]]
+    y = df["Price"]
+    lr_model.fit(X, y)
+    pickle.dump(lr_model, open("linear_model.pkl", "wb"))
 
-def predict(models, house_features: dict):
-    """
-    Predict house price using available models.
-    Here we average predictions across all models.
-    """
-    X = [[
-        house_features["sqft"],
-        house_features["bedrooms"],
-        house_features["bathrooms"],
-        house_features["location_encoded"]
-    ]]
+# XGBoost
+try:
+    xgb_model = pickle.load(open("xgb_model.pkl", "rb"))
+except:
+    xgb_model = XGBRegressor()
+    xgb_model.fit(X, y)
+    pickle.dump(xgb_model, open("xgb_model.pkl", "wb"))
 
+# SARIMAX
+try:
+    sarimax_model = pickle.load(open("sarimax_model.pkl", "rb"))
+except:
+    ts = df.groupby("Year")["Price"].mean() if "Year" in df.columns else df["Price"]
+    sarimax_model = SARIMAX(ts, order=(1,1,1), seasonal_order=(1,1,1,12) if "Year" in df.columns else (0,0,0,0)).fit(disp=False)
+    pickle.dump(sarimax_model, open("sarimax_model.pkl", "wb"))
+
+# ----------------------------
+# 3. Helper Functions
+# ----------------------------
+def preprocess_input(new_house):
+    return pd.DataFrame([new_house])
+
+def predict_price(new_house):
+    X_new = preprocess_input(new_house)
     preds = []
-    for name, model in models.items():
+    if lr_model:
+        preds.append(float(lr_model.predict(X_new)[0]))
+    if xgb_model:
+        preds.append(float(xgb_model.predict(X_new)[0]))
+    if sarimax_model:
         try:
-            preds.append(model.predict(X)[0])
-        except Exception as e:
-            print(f"⚠ Model {name} failed:", e)
+            preds.append(float(sarimax_model.forecast(steps=1)[0]))
+        except:
+            pass
+    return np.mean(preds) if preds else 5000000
 
-    return sum(preds) / len(preds) if preds else 0
-
-
-
-def comparative_market_analysis(new_house, df, k=10):
-    features = ["sqft", "bedrooms", "bathrooms", "location_encoded"]
+def comparative_market_analysis(new_house, k=10):
+    features = ["Area", "Bedrooms", "Bathrooms", "location_encoded"]
     knn = NearestNeighbors(n_neighbors=k).fit(df[features])
-
-    new_df = pd.DataFrame([new_house])
-    distances, indices = knn.kneighbors(new_df)
+    X_new = pd.DataFrame([new_house])
+    distances, indices = knn.kneighbors(X_new)
     similar = df.iloc[indices[0]]
-
-    return {
+    return similar, {
         "low": similar["price"].quantile(0.25),
         "median": similar["price"].median(),
-        "high": similar["price"].quantile(0.75),
-        "similar": similar
+        "high": similar["price"].quantile(0.75)
     }
 
-
-
-def load_and_encode_data():
-    """
-    Load dataset and encoders
-    """
-    try:
-        df = pd.read_csv("house2.csv")
-        encoders = joblib.load("encoders.pkl")   # LabelEncoders, etc.
-    except Exception as e:
-        print("⚠ Error loading data/encoders:", e)
-        df = pd.DataFrame()
-        encoders = {}
-    return df, encoders
-
-def comparative_market_analysis(house, df):
-    """
-    Compare input house with similar properties in dataset.
-    """
-    if df.empty:
-        return {"low": 0, "high": 0, "median": 0}
-
-    # Filter by location + bedrooms
-    similar = df[
-        (df["location_encoded"] == house["location_encoded"]) &
-        (df["bedrooms"] == house["bedrooms"])
-    ]
-
-    if similar.empty:
-        return {"low": 0, "high": 0, "median": 0}
-
-    prices = similar["price"].values
+def parse_chat_input(text):
+    sqft = re.search(r"(\d+)\s*Area", text)
+    bhk = re.search(r"(\d+)\s*BHK", text, re.IGNORECASE)
+    loc = re.search(r"in\s+([a-zA-Z\s]+)", text)
     return {
-        "low": np.min(prices),
-        "high": np.max(prices),
-        "median": np.median(prices)
+        "sqft": int(sqft.group(1)) if sqft else 1000,
+        "bedrooms": int(bhk.group(1)) if bhk else 2,
+        "bathrooms": 2,
+        "location_encoded": le_location.transform([loc.group(1)])[0] if loc else 0
     }
 
+def chatbot_reply(user_text):
+    house = parse_chat_input(user_text)
+    price = predict_price(house)
+    similar, stats = comparative_market_analysis(house)
+    reply = f"🏠 Predicted Price: ₹{price:,.0f}\n"
+    reply += f"📊 Market Range: ₹{stats['low']:,.0f} - ₹{stats['high']:,.0f}\n"
+    reply += f"💡 Median Price: ₹{stats['median']:,.0f}\n\n"
+    reply += "Similar Houses:\n"
+    reply += similar[["price","sqft","bedrooms"]].head(5).to_string(index=False)
+    return reply
 
+# ----------------------------
+# 4. Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="🏠 Real Estate Assistant", layout="wide")
+st.title("🏠 Real Estate Price Assistant")
 
-def load_and_encode_data():
-    """
-    Load dataset and encoders
-    """
-    try:
-        df = pd.read_csv("house2.csv")
-        encoders = joblib.load("encoders.pkl")   # LabelEncoders, etc.
-    except Exception as e:
-        print("⚠ Error loading data/encoders:", e)
-        df = pd.DataFrame()
-        encoders = {}
-    return df, encoders
+tab1, tab2, tab3 = st.tabs(["🔮 Price Prediction","📊 CMA","💬 Chatbot"])
 
-def comparative_market_analysis(house, df):
-    """
-    Compare input house with similar properties in dataset.
-    """
-    if df.empty:
-        return {"low": 0, "high": 0, "median": 0}
+with tab1:
+    st.header("Price Prediction")
+    sqft = st.number_input("Square Feet", 500, 5000, 1200)
+    bedrooms = st.number_input("Bedrooms", 1, 10, 2)
+    bathrooms = st.number_input("Bathrooms", 1, 5, 2)
+    location = st.selectbox("City", df["City"].unique())
+    loc_encoded = le_location.transform([location])[0]
 
-    # Filter by location + bedrooms
-    similar = df[
-        (df["location_encoded"] == house["location_encoded"]) &
-        (df["bedrooms"] == house["bedrooms"])
-    ]
+    if st.button("Predict Price"):
+        house = {"sqft": sqft, "bedrooms": bedrooms, "bathrooms": bathrooms, "location_encoded": loc_encoded}
+        price = predict_price(house)
+        st.success(f"Estimated Price: ₹{price:,.0f}")
 
-    if similar.empty:
-        return {"low": 0, "high": 0, "median": 0}
+with tab2:
+    st.header("Comparative Market Analysis")
+    sqft = st.number_input("Square Feet (CMA)", 500, 5000, 1500)
+    bedrooms = st.number_input("Bedrooms (CMA)", 1, 10, 2)
+    bathrooms = st.number_input("Bathrooms (CMA)", 1, 5, 2)
+    location = st.selectbox("City (CMA)", df["City"].unique())
+    loc_encoded = le_location.transform([location])[0]
 
-    prices = similar["price"].values
-    return {
-        "low": np.min(prices),
-        "high": np.max(prices),
-        "median": np.median(prices)
-    }
+    if st.button("Run CMA"):
+        house = {"sqft": sqft, "bedrooms": bedrooms, "bathrooms": bathrooms, "location_encoded": loc_encoded}
+        similar, stats = comparative_market_analysis(house)
+        st.write(f"📊 Price Range: ₹{stats['low']:,.0f} - ₹{stats['high']:,.0f}")
+        st.write(f"💡 Median: ₹{stats['median']:,.0f}")
+        st.dataframe(similar[["price","sqft","bedrooms","bathrooms","location"]])
 
+with tab3:
+    st.header("Chatbot")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
+    user_input = st.text_input("Ask your query (e.g., 'Price of 2BHK in Mumbai 1200 sqft')")
+    if st.button("Send"):
+        st.session_state.chat_history.append(("You", user_input))
+        reply = chatbot_reply(user_input)
+        st.session_state.chat_history.append(("Bot", reply))
 
-# --- Load Models & Encoders ---
-@st.cache_resource
-def load_models():
-    models = {}
-    try:
-        models["linear"] = joblib.load("linear_regression.pkl")
-        models["xgb"] = joblib.load("xgboost.pkl")
-    except Exception as e:
-        st.error(f"⚠ Error loading models: {e}")
-    return models
-
-@st.cache_data
-def load_and_encode_data():
-    try:
-        df = pd.read_csv("housing_data.csv")
-        encoders = joblib.load("encoders.pkl")
-    except Exception as e:
-        st.error(f"⚠ Error loading data/encoders: {e}")
-        df, encoders = pd.DataFrame(), {}
-    return df, encoders
-
-def predict(models, house_features: dict):
-    X = [[
-        house_features["sqft"],
-        house_features["bedrooms"],
-        house_features["bathrooms"],
-        house_features["location_encoded"]
-    ]]
-    preds = []
-    for name, model in models.items():
-        try:
-            preds.append(model.predict(X)[0])
-        except Exception as e:
-            st.warning(f"Model {name} failed: {e}")
-    return sum(preds) / len(preds) if preds else 0
-
-def comparative_market_analysis(house, df):
-    if df.empty:
-        return {"low": 0, "high": 0, "median": 0}
-    similar = df[
-        (df["location_encoded"] == house["location_encoded"]) &
-        (df["bedrooms"] == house["bedrooms"])
-    ]
-    if similar.empty:
-        return {"low": 0, "high": 0, "median": 0}
-    prices = similar["price"].values
-    return {"low": np.min(prices), "high": np.max(prices), "median": np.median(prices)}
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="🏠 House Price Chatbot", layout="centered")
-st.title("🏠 House Price Prediction Chatbot")
-
-df, encoders = load_and_encode_data()
-models = load_models()
-
-# Chat history
-if "messages" not in st.session_state:
-    st.session_state["messages"] = []
-
-# Show previous messages
-for msg in st.session_state["messages"]:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-# User input
-if prompt := st.chat_input("Ask me about house prices..."):
-    st.session_state["messages"].append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    # Extract structured info (simple demo: ask directly)
-    sqft = st.number_input("📐 Enter square feet:", min_value=500, max_value=10000, step=50)
-    bedrooms = st.number_input("🛏 Bedrooms:", min_value=1, max_value=10, step=1)
-    location = st.text_input("📍 Location:")
-
-    if st.button("Predict"):
-        try:
-            loc_encoded = encoders["location"].transform([location])[0]
-            house = {"sqft": sqft, "bedrooms": bedrooms, "bathrooms": 2, "location_encoded": loc_encoded}
-            price = predict(models, house)
-            cma = comparative_market_analysis(house, df)
-
-            response = (
-                f"🏠 Predicted: ₹{price:,.0f}\n\n"
-                f"📊 CMA Range: ₹{cma['low']:,.0f} - ₹{cma['high']:,.0f}\n\n"
-                f"💡 Median: ₹{cma['median']:,.0f}"
-            )
-        except Exception as e:
-            response = f"⚠ Error: {e}"
-
-        st.session_state["messages"].append({"role": "assistant", "content": response})
-        with st.chat_message("assistant"):
-            st.markdown(response)
+    for role, msg in st.session_state.chat_history:
+        st.markdown(f"{role}:** {msg}")
